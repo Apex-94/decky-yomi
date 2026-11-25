@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+py_modules/
+
+# Build output
+dist/
+
+# Data files (user-specific)
+*.db
+*.csv
+*.tsv
+*.jsonl
+capture.png
+
+# Secrets / local env
+.env
+.env.*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Decky development & installer state
+/tmp/
+*.log
+*.zip
+__pycache__/
+*.py[cod]
+.test_data/
+test_runs/
+installer-tmp/
+installer-venv/

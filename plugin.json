@@ -1,0 +1,16 @@
+{
+  "name": "Decky Yomi",
+  "author": "DeckYomi",
+  "version": "0.1.9",
+  "description": "Japanese learning assistant \u2014 OCR game text, look up words with JMDict, learn while you play.",
+  "flags": [],
+  "tags": [
+    "utility",
+    "language",
+    "japanese"
+  ],
+  "api_version": 1,
+  "publish": {
+    "ids": []
+  }
+}

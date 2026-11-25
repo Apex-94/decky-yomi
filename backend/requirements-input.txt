@@ -1,0 +1,5 @@
+# Optional evdev input dependency (requires gcc and linux/input.h on target)
+# Install with: pip install --require-hashes -r backend/requirements-input.txt
+
+evdev==2.0.0 \
+    --hash=sha256:442fb3f4c8dfc9e61e901133c356220c02d663eca8f34722e0cecdd637eba504
