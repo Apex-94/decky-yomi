@@ -2,7 +2,11 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PLUGIN_DIR="/home/deck/homebrew/plugins/decky-yomi"
+DEFAULT_HOMEBREW="${HOME:-/home/deck}/homebrew"
+if [ ! -d "$DEFAULT_HOMEBREW/plugins" ] && [ -d "/home/deck/homebrew/plugins" ]; then
+  DEFAULT_HOMEBREW="/home/deck/homebrew"
+fi
+PLUGIN_DIR="${PLUGIN_DIR:-$DEFAULT_HOMEBREW/plugins/decky-yomi}"
 
 cd "$ROOT_DIR"
 
@@ -15,6 +19,7 @@ fi
 node scripts/check-bundle.mjs
 
 echo "==> Syncing runtime files to $PLUGIN_DIR..."
+mkdir -p "$PLUGIN_DIR/dist" "$PLUGIN_DIR/backend" "$PLUGIN_DIR/defaults" "$PLUGIN_DIR/assets"
 cp -r dist/* "$PLUGIN_DIR/dist/"
 cp main.py "$PLUGIN_DIR/"
 cp backend/*.py backend/*.sh backend/requirements.txt "$PLUGIN_DIR/backend/"

@@ -9,7 +9,12 @@ import tempfile
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_DATA_DIR = "/home/deck/homebrew/settings/decky-yomi"
+_HOME_DATA_DIR = os.path.expanduser("~/homebrew/settings/decky-yomi")
+DEFAULT_DATA_DIR = (
+    _HOME_DATA_DIR
+    if os.path.exists(os.path.expanduser("~/homebrew")) or not os.path.exists("/home/deck/homebrew")
+    else "/home/deck/homebrew/settings/decky-yomi"
+)
 DEFAULT_IMAGE = os.path.join(DEFAULT_DATA_DIR, "capture.png")
 
 

@@ -16,7 +16,12 @@ import time
 from datetime import datetime
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_DATA_DIR = "/home/deck/homebrew/settings/decky-yomi"
+_HOME_DATA_DIR = os.path.expanduser("~/homebrew/settings/decky-yomi")
+DEFAULT_DATA_DIR = (
+    _HOME_DATA_DIR
+    if os.path.exists(os.path.expanduser("~/homebrew")) or not os.path.exists("/home/deck/homebrew")
+    else "/home/deck/homebrew/settings/decky-yomi"
+)
 
 
 def is_gamescope_running() -> bool:

@@ -252,7 +252,43 @@ class TestDeckyYomiBackend(unittest.TestCase):
 
         loop.close()
 
-    def test_locked_requirements_subset_no_extra_index(self):
+    def test_torch_requirement_arch_selection(self):
+        from main import _torch_requirement
+        x86_spec, x86_extra = _torch_requirement("x86_64", "3.14")
+        self.assertIn("manylinux_2_28_x86_64.whl", x86_spec)
+        self.assertEqual(x86_extra, [])
+
+        arm_spec, arm_extra = _torch_requirement("aarch64", "3.14")
+        self.assertIn("manylinux_2_28_aarch64.whl", arm_spec)
+        self.assertEqual(arm_extra, [])
+
+        mac_arm_spec, _ = _torch_requirement("arm64", "3.14")
+        self.assertEqual(mac_arm_spec, arm_spec)
+
+        fb_spec = None
+        with self.assertRaises(RuntimeError):
+            _torch_requirement("aarch64", "3.12")
+        self.assertIsNone(fb_spec)
+
+    def test_get_pip_checksum_verification_and_locked_requirements(self):
+        import io
+        from unittest.mock import patch
+        import main
+
+        good = b"print('ok')"
+        bad_resp = io.BytesIO(b"tampered")
+        dest = os.path.join(self.test_dir, "get-pip.py")
+        with patch("main.urllib.request.urlopen", return_value=bad_resp):
+            with self.assertRaises(ValueError):
+                self.plugin._download_get_pip(dest)
+        self.assertFalse(os.path.exists(dest))
+
+        good_digest = main.hashlib.sha256(good).hexdigest()
+        with patch("main.GET_PIP_SHA256", good_digest), \
+             patch("main.urllib.request.urlopen", return_value=io.BytesIO(good)):
+            self.plugin._download_get_pip(dest)
+        self.assertTrue(os.path.exists(dest))
+
         locked_out = os.path.join(self.test_dir, "locked.txt")
         self.plugin._write_locked_requirements(["dictionary"], locked_out)
         with open(locked_out, "r", encoding="utf-8") as f:
@@ -264,6 +300,7 @@ class TestDeckyYomiBackend(unittest.TestCase):
     def test_yomitan_import_rejects_oversized_glossary_and_zip_limits(self):
         from unittest.mock import patch
         async def run():
+            # Reject a 2 MB glossary inside a tiny compressed archive
             bomb_zip = os.path.join(self.test_dir, "bomb.zip")
             with zipfile.ZipFile(bomb_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                 zf.writestr("index.json", json.dumps({"title": "Bomb Dict"}))
@@ -274,6 +311,7 @@ class TestDeckyYomiBackend(unittest.TestCase):
             self.assertFalse(res.get("imported"))
             self.assertIn("limit", res.get("error", "").lower())
 
+            # Reject archives exceeding entry count cap
             many_zip = os.path.join(self.test_dir, "many.zip")
             with zipfile.ZipFile(many_zip, "w") as zf:
                 zf.writestr("index.json", json.dumps({"title": "Many Dict"}))
@@ -282,6 +320,7 @@ class TestDeckyYomiBackend(unittest.TestCase):
             res_many = await self.plugin.import_yomitan_dict(many_zip)
             self.assertFalse(res_many.get("imported"))
 
+            # Verify import runs via asyncio.to_thread (off event loop)
             good_zip = os.path.join(self.test_dir, "good.zip")
             with zipfile.ZipFile(good_zip, "w") as zf:
                 zf.writestr("index.json", json.dumps({"title": "Thread Dict"}))
@@ -330,6 +369,32 @@ class TestDeckyYomiBackend(unittest.TestCase):
             self.assertIn("'=1+1\t'+cmd\t'-minus\t'@pos\t'=HYPERLINK()", safe_txt)
         asyncio.run(run())
 
+    def test_session_cmd_skips_runuser_when_deck_missing(self):
+        from unittest.mock import patch
+        import pwd
+        with patch("main.os.geteuid", return_value=0), patch("main.shutil.which", return_value="/usr/sbin/runuser"), patch.object(pwd, "getpwnam", side_effect=KeyError("deck")):
+            cmd, env = self.plugin._session_cmd_and_env(["ffmpeg", "-vframes", "1"], display=":0")
+        self.assertEqual(cmd, ["ffmpeg", "-vframes", "1"])
+        self.assertEqual(env["DISPLAY"], ":0")
+
+    def test_start_install_skips_unbuildable_evdev_in_all(self):
+        from unittest.mock import patch
+        async def run():
+            with patch.object(self.plugin, "_is_module_available", return_value=False), \
+                 patch.object(self.plugin, "_can_build_evdev", return_value=False), \
+                 patch("main.asyncio.create_task") as mock_task:
+                res = await self.plugin.start_install("all")
+                self.assertTrue(res["started"])
+                mock_task.assert_called_once()
+                scheduled = mock_task.call_args.args[0]
+                scheduled.close()
+                self.assertNotIn("evdev", self.plugin.install_state["logs"][1])
+                self.plugin.install_state["status"] = "idle"
+                res_input = await self.plugin.start_install("input")
+                self.assertFalse(res_input["started"])
+                self.assertIn("evdev", res_input["error"])
+        asyncio.run(run())
+
     def test_screen_capture_and_display_detection(self):
         """Test display detection and screen capture execution."""
         loop = asyncio.new_event_loop()
@@ -361,6 +426,35 @@ class TestDeckyYomiBackend(unittest.TestCase):
         self.assertIn("raw_text", initial_result)
 
         loop.close()
+
+    def test_controller_monitor_reads_droiddeck_rbif_ring(self):
+        import struct
+        from unittest.mock import patch
+        from backend.controller_monitor import ControllerButtonMonitor, RBIF_IMU_OFFSET
+
+        ring_path = os.path.join(self.test_dir, "ring0")
+        buf = bytearray(0x18180)
+        struct.pack_into("<4sIII", buf, 0, b"RBIF", 2, 24, 4096)
+        struct.pack_into("<Q", buf, 0x20, 4)  # even seqlock
+        # Base buttons: A (0x001) + SELECT (0x040), triggers: R2=200, L2=0, dpad: UP (-1)
+        struct.pack_into("<I", buf, 0x28, 0x041)
+        struct.pack_into("<4h", buf, 0x34, 200, 0, 0, -1)
+        # IMU1 tail with L4 (0x01) + R5 (0x08)
+        struct.pack_into("<4s4xQ", buf, RBIF_IMU_OFFSET, b"IMU1", 2)
+        struct.pack_into("<I", buf, RBIF_IMU_OFFSET + 0x28, 0x09)
+        with open(ring_path, "wb") as f:
+            f.write(buf)
+
+        mon = ControllerButtonMonitor()
+        with patch.object(mon, "find_hidraw_device", return_value=None), \
+             patch.dict(os.environ, {"FAKE_EVDEV_MEMFD_PATHS": f"0={ring_path}"}):
+            started = mon.start()
+            self.assertTrue(started)
+            try:
+                buttons = mon._sample_ring_buttons()
+                self.assertEqual(buttons, {"A", "SELECT", "R2", "DPAD_UP", "L4", "R5"})
+            finally:
+                mon.stop()
 
 if __name__ == "__main__":
     unittest.main()

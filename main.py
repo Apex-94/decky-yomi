@@ -13,6 +13,9 @@ import uuid
 from pathlib import Path
 from datetime import datetime
 import shutil
+import platform
+import urllib.request
+import hashlib
 import zipfile
 
 # Add plugin directory and vendored modules to path before importing submodules
@@ -59,6 +62,9 @@ meiki_ocr_engine = None
 morphological_tagger = None
 dictionary_engine = None
 
+GET_PIP_URL = "https://raw.githubusercontent.com/pypa/get-pip/8c427468071b5d15717839ffd76c53a96df8b703/public/get-pip.py"
+GET_PIP_SHA256 = "356e0d0de21cdc348c3394084d90939b85e4246c4d14c76aee6ca4f46646ea98"
+
 YOMITAN_MAX_ARCHIVE_BYTES = 100 * 1024 * 1024
 YOMITAN_MAX_ZIP_ENTRIES = 250
 YOMITAN_MAX_INDEX_BYTES = 512 * 1024
@@ -67,6 +73,34 @@ YOMITAN_MAX_TOTAL_BYTES = 64 * 1024 * 1024
 YOMITAN_MAX_TERMS = 500_000
 YOMITAN_MAX_FIELD_CHARS = 1_024
 YOMITAN_MAX_GLOSSARY_CHARS = 16_384
+
+TORCH_CPU_WHEELS = {
+    ("3.14", "x86_64"): "torch @ https://download.pytorch.org/whl/cpu/torch-2.9.1%2Bcpu-cp314-cp314-manylinux_2_28_x86_64.whl#sha256=88adf5157db5da1d54b1c9fe4a6c1d20ceef00e75d854e206a87dbf69e3037dc",
+    ("3.14", "aarch64"): "torch @ https://download.pytorch.org/whl/cpu/torch-2.9.1%2Bcpu-cp314-cp314-manylinux_2_28_aarch64.whl#sha256=65010ab4aacce6c9a1ddfc935f986c003ca8638ded04348fd326c3e74346237c",
+}
+
+
+def _normalize_arch(machine=None):
+    """Normalize platform.machine() values to wheel arch names."""
+    arch = (machine or platform.machine() or "").lower()
+    if arch in ("amd64", "x86_64"):
+        return "x86_64"
+    if arch in ("arm64", "aarch64"):
+        return "aarch64"
+    return arch
+
+
+def _torch_requirement(machine=None, py_version=None):
+    """Return (requirement_spec, extra_pip_args) for a hash-pinned CPU PyTorch wheel."""
+    arch = _normalize_arch(machine)
+    ver = py_version or f"{sys.version_info.major}.{sys.version_info.minor}"
+    pinned = TORCH_CPU_WHEELS.get((ver, arch))
+    if not pinned:
+        raise RuntimeError(
+            f"Unsupported Python/architecture for verified dependency install: Python {ver} on {arch}. "
+            "Supported targets: Python 3.14 on x86_64 or aarch64."
+        )
+    return pinned, []
 
 
 def _sanitize_tsv_cell(value) -> str:
@@ -87,6 +121,8 @@ def _read_zip_entry_limited(zf: zipfile.ZipFile, info: zipfile.ZipInfo, max_byte
         raise ValueError(f"Archive entry '{info.filename}' decompressed size exceeds {max_bytes} byte limit")
     return data
 
+
+_UI_TORCH_SPEC = TORCH_CPU_WHEELS.get((f"{sys.version_info.major}.{sys.version_info.minor}", _normalize_arch()), TORCH_CPU_WHEELS[("3.14", "x86_64")])
 
 COMPONENT_LOCK_NAMES = {
     "dictionary": {"jamdict", "jamdict-data", "chirptext", "puchikarui"},
@@ -124,7 +160,7 @@ COMPONENTS = {
         "id": "ocr",
         "name": "Japanese OCR Engines (MeikiOCR + Manga-OCR)",
         "desc": "Fast game/VN ONNX OCR (MeikiOCR) & manga fallback (Manga-OCR)",
-        "packages": ["torch @ https://download.pytorch.org/whl/cpu/torch-2.9.1%2Bcpu-cp314-cp314-manylinux_2_28_x86_64.whl#sha256=88adf5157db5da1d54b1c9fe4a6c1d20ceef00e75d854e206a87dbf69e3037dc", "manga-ocr==0.1.16", "meikiocr==0.3.5", "onnxruntime==1.32.0", "opencv-python-headless==5.1.0.95", "huggingface-hub==0.36.2", "transformers==4.57.6", "pillow==13.0.0"],
+        "packages": [_UI_TORCH_SPEC, "manga-ocr==0.1.16", "meikiocr==0.3.5", "onnxruntime==1.32.0", "opencv-python-headless==5.1.0.95", "huggingface-hub==0.36.2", "transformers==4.57.6", "pillow==13.0.0"],
         "check_module": "meikiocr",
         "size": "CPU runtime + ONNX/PyTorch models",
     },
@@ -383,16 +419,24 @@ class Plugin:
         except Exception:
             return False
 
+    def _can_build_evdev(self) -> bool:
+        """Return True if evdev is importable or a C compiler and kernel input headers exist."""
+        if self._is_module_available("evdev"):
+            return True
+        has_cc = bool(shutil.which("gcc") or shutil.which("cc"))
+        return has_cc and os.path.exists("/usr/include/linux/input.h")
+
     @traced
     async def get_components_status(self) -> dict:
         """Return detailed status for all downloadable components."""
         components_list = []
         readiness = await self.get_engine_status()
         all_installed = True
+        can_build_evdev = self._can_build_evdev()
 
         for c_id, c in COMPONENTS.items():
             installed = readiness.get(c_id, self._is_module_available(c["check_module"]))
-            if not installed:
+            if not installed and (c_id != "input" or can_build_evdev):
                 all_installed = False
             components_list.append({
                 "id": c["id"],
@@ -420,14 +464,29 @@ class Plugin:
         if self.install_state["status"] == "installing":
             return {"started": False, "error": "Installation already in progress"}
 
+        selected_ids = []
         packages = []
+        skipped_notes = []
         if component_id == "all":
             for c_id, c in COMPONENTS.items():
-                if not self._is_module_available(c["check_module"]):
-                    packages.extend(c["packages"])
+                if self._is_module_available(c["check_module"]):
+                    continue
+                if c_id == "input" and not self._can_build_evdev():
+                    skipped_notes.append(
+                        "Skipping optional 'input' (evdev): C compiler and /usr/include/linux/input.h are unavailable."
+                    )
+                    continue
+                selected_ids.append(c_id)
+                packages.extend(c["packages"])
             if not packages:
                 return {"started": False, "error": "All components are already installed!"}
         elif component_id in COMPONENTS:
+            if component_id == "input" and not self._can_build_evdev():
+                return {
+                    "started": False,
+                    "error": "Cannot build evdev: install gcc and linux-libc-dev (/usr/include/linux/input.h). Preset capture works without it.",
+                }
+            selected_ids = [component_id]
             packages = COMPONENTS[component_id]["packages"]
         else:
             return {"started": False, "error": f"Unknown component: {component_id}"}
@@ -439,12 +498,13 @@ class Plugin:
             "percent": 5,
             "logs": [
                 f"Target: {self.py_modules_dir}",
-                f"Packages: {', '.join(packages)}"
+                f"Packages: {', '.join(packages)}",
+                *skipped_notes,
             ],
             "error": None,
         }
 
-        asyncio.create_task(self._run_install_task(packages, component_id))
+        asyncio.create_task(self._run_install_task(packages, component_id, selected_ids))
         return {"started": True, "component": component_id}
 
     def _installer_runtime(self):
@@ -461,21 +521,17 @@ class Plugin:
             env["LD_LIBRARY_PATH"] = original
         return python, env
 
-    @traced
-    async def _prepare_installer_runtime(self):
-        python, env = self._installer_runtime()
-        temp_dir = os.path.join(self.data_dir, "installer-tmp")
-        os.makedirs(temp_dir, exist_ok=True)
-        env["TMPDIR"] = temp_dir
-        runtime_dir = os.path.join(self.data_dir, "installer-venv")
-        self.install_state["current_step"] = "Preparing private Python environment and pip..."
+    async def _run_tracked_subprocess(self, cmd: list, env: dict, timeout: float):
+        """Run a subprocess while tracking it for cancellation, returning (returncode, combined_output)."""
         proc = await asyncio.create_subprocess_exec(
-            python, "-I", "-m", "venv", runtime_dir,
-            env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            *cmd,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
         )
         self.install_process = proc
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), 120)
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout)
         except BaseException:
             if proc.returncode is None:
                 proc.kill()
@@ -483,29 +539,29 @@ class Plugin:
             raise
         finally:
             self.install_process = None
-        if proc.returncode:
-            raise RuntimeError("Could not prepare private pip environment: " + stderr.decode(errors="replace")[-2000:])
-        python = os.path.join(runtime_dir, "bin", "python")
-        await self._verify_installer_runtime(python, env)
-        return python, env
+        return proc.returncode, stdout.decode(errors="replace")
 
-    @traced
-    async def _verify_installer_runtime(self, python, env):
-        proc = await asyncio.create_subprocess_exec(
-            python, "-I", "-c", "import sys, pip; print('%d.%d' % sys.version_info[:2])",
-            env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
+    async def _is_venv_ready(self, venv_python: str, env: dict) -> bool:
+        """Return True if an existing private venv matches our Python minor version and has pip."""
+        if not os.path.isfile(venv_python):
+            return False
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), 15)
-        except BaseException:
-            if proc.returncode is None:
-                proc.kill()
-            await proc.wait()
-            raise
-        expected = "%d.%d" % sys.version_info[:2]
-        if proc.returncode or stdout.decode().strip() != expected:
-            raise RuntimeError("Dependency setup requires standalone Python " + expected + " with pip. " + stderr.decode(errors="replace")[-1000:])
-        self._diagnostic("installer.runtime", "pip", executable=python, python=expected)
+            await self._verify_installer_runtime(venv_python, env)
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _download_get_pip(dest_path: str):
+        with urllib.request.urlopen(GET_PIP_URL, timeout=60) as resp:
+            data = resp.read()
+        digest = hashlib.sha256(data).hexdigest()
+        if digest != GET_PIP_SHA256:
+            raise ValueError(
+                f"get-pip.py SHA-256 verification failed: expected {GET_PIP_SHA256}, got {digest}"
+            )
+        with open(dest_path, "wb") as f:
+            f.write(data)
 
     @staticmethod
     def _parse_lockfile_blocks(lock_path: str) -> list:
@@ -542,9 +598,14 @@ class Plugin:
         wanted = set()
         for cid in selected_ids:
             wanted.update(COMPONENT_LOCK_NAMES.get(cid, set()))
+        if "ocr" in selected_ids:
+            # Verify Python/arch support cleanly instead of falling back to unpinned indexes
+            _torch_requirement()
+
         lock_paths = [os.path.join(BACKEND_DIR, "requirements.txt")]
         if "input" in selected_ids:
             lock_paths.append(os.path.join(BACKEND_DIR, "requirements-input.txt"))
+
         kept = []
         for path in lock_paths:
             for pkg_name, block_text in self._parse_lockfile_blocks(path):
@@ -557,7 +618,66 @@ class Plugin:
         return dest_path
 
     @traced
-    async def _run_install_task(self, packages: list, component_id: str):
+    async def _prepare_installer_runtime(self):
+        python, env = self._installer_runtime()
+        temp_dir = os.path.join(self.data_dir, "installer-tmp")
+        os.makedirs(temp_dir, exist_ok=True)
+        env["TMPDIR"] = temp_dir
+        runtime_dir = os.path.join(self.data_dir, "installer-venv")
+        venv_python = os.path.join(runtime_dir, "bin", "python")
+
+        if await self._is_venv_ready(venv_python, env):
+            return venv_python, env
+
+        # Clear any half-created venv first, then fall back to get-pip.py when python3-venv isn't installed.
+        self.install_state["current_step"] = "Preparing private Python environment and pip..."
+        rc, out = await self._run_tracked_subprocess([python, "-I", "-m", "venv", "--clear", runtime_dir], env, 120)
+        if rc != 0:
+            rc2, out2 = await self._run_tracked_subprocess(
+                [python, "-I", "-m", "venv", "--clear", "--without-pip", runtime_dir], env, 120
+            )
+            if rc2 != 0:
+                combined = (out + "\n" + out2).strip()[-2000:]
+                raise RuntimeError("Could not prepare private pip environment: " + combined)
+            self.install_state["current_step"] = "Bootstrapping pip into private environment..."
+            get_pip_path = os.path.join(temp_dir, "get-pip.py")
+            try:
+                await asyncio.to_thread(self._download_get_pip, get_pip_path)
+            except Exception as e:
+                hint = " (or install python3-venv)" if "ensurepip" in out else ""
+                raise RuntimeError(f"Could not download pip bootstrapper{hint}: {e}") from e
+            rc3, out3 = await self._run_tracked_subprocess(
+                [venv_python, "-I", get_pip_path, "--no-cache-dir"], env, 180
+            )
+            if rc3 != 0:
+                raise RuntimeError("Could not bootstrap pip into private environment: " + out3.strip()[-2000:])
+
+        await self._verify_installer_runtime(venv_python, env)
+        return venv_python, env
+
+    @traced
+    async def _verify_installer_runtime(self, python, env):
+        proc = await asyncio.create_subprocess_exec(
+            python, "-I", "-c", "import sys, pip; print('%d.%d' % sys.version_info[:2])",
+            env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), 15)
+        except BaseException:
+            if proc.returncode is None:
+                proc.kill()
+            await proc.wait()
+            raise
+        expected = "%d.%d" % sys.version_info[:2]
+        out_str = stdout.decode(errors="replace").strip()
+        err_str = stderr.decode(errors="replace").strip()
+        if proc.returncode or out_str != expected:
+            detail = (err_str or out_str)[-1000:]
+            raise RuntimeError("Dependency setup requires standalone Python " + expected + " with pip. " + detail)
+        self._diagnostic("installer.runtime", "pip", executable=python, python=expected)
+
+    @traced
+    async def _run_install_task(self, packages: list, component_id: str, selected_ids: list | None = None):
         """Background worker that runs pip install --target --require-hashes and streams progress."""
         try:
             decky.logger.info(f"Decky Yomi: Starting in-UI download for: {packages}")
@@ -566,7 +686,7 @@ class Plugin:
             python, env = await self._prepare_installer_runtime()
             temp_dir = os.path.join(self.data_dir, "installer-tmp")
             os.makedirs(temp_dir, exist_ok=True)
-            ids = [c for c in COMPONENTS] if component_id == "all" else [component_id]
+            ids = selected_ids or ([c for c in COMPONENTS if c != "input" or self._can_build_evdev()] if component_id == "all" else [component_id])
             req_path = os.path.join(temp_dir, f"locked-{component_id}.txt")
             self._write_locked_requirements(ids, req_path)
             cmd = [
@@ -787,6 +907,22 @@ class Plugin:
         except Exception as e:
             decky.logger.warning(f"Failed to crop region from screenshot: {e}")
 
+    def _session_cmd_and_env(self, cmd: list, display: str = None) -> tuple:
+        """Build command/env for screen capture, dropping to user 'deck' only when it actually exists."""
+        env = dict(os.environ)
+        if display:
+            env["DISPLAY"] = display
+        if "XDG_RUNTIME_DIR" not in env and os.path.exists("/run/user/1000"):
+            env["XDG_RUNTIME_DIR"] = "/run/user/1000"
+        if os.geteuid() == 0 and shutil.which("runuser"):
+            try:
+                import pwd
+                pwd.getpwnam("deck")
+                cmd = ["runuser", "-u", "deck", "--"] + cmd
+            except KeyError:
+                pass
+        return cmd, env
+
     async def _capture_pipewire(self, output_path: str, region: dict = None) -> bool:
         """Capture screen using GStreamer pipewiresrc (native Gamescope compositor capture on SteamOS)."""
         gst_bin = shutil.which("gst-launch-1.0") or "/usr/bin/gst-launch-1.0"
@@ -814,13 +950,7 @@ class Plugin:
             "filesink",
             f"location={output_path}",
         ]
-
-        if os.geteuid() == 0 and shutil.which("runuser"):
-            cmd = ["runuser", "-u", "deck", "--"] + cmd
-
-        env = dict(os.environ)
-        if "XDG_RUNTIME_DIR" not in env and os.path.exists("/run/user/1000"):
-            env["XDG_RUNTIME_DIR"] = "/run/user/1000"
+        cmd, env = self._session_cmd_and_env(cmd)
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -899,15 +1029,7 @@ class Plugin:
 
         for display in candidate_displays:
             cmd = [ffmpeg_bin, "-y", "-f", "x11grab", "-i", display, "-vframes", "1", output_path]
-
-            # If running as root (UID 0), runuser as 'deck' who owns the X11 session
-            if os.geteuid() == 0 and shutil.which("runuser"):
-                cmd = ["runuser", "-u", "deck", "--"] + cmd
-
-            env = dict(os.environ)
-            env["DISPLAY"] = display
-            if "XDG_RUNTIME_DIR" not in env and os.path.exists("/run/user/1000"):
-                env["XDG_RUNTIME_DIR"] = "/run/user/1000"
+            cmd, env = self._session_cmd_and_env(cmd, display=display)
 
             try:
                 proc = await asyncio.create_subprocess_exec(
@@ -953,27 +1075,21 @@ class Plugin:
     async def _capture_spectacle(self, output_path: str, region: dict = None) -> bool:
         """Capture screen using spectacle."""
         display = self._get_x11_display()
-        env = dict(os.environ)
-        env["DISPLAY"] = display
-        if "XDG_RUNTIME_DIR" not in env and os.path.exists("/run/user/1000"):
-            env["XDG_RUNTIME_DIR"] = "/run/user/1000"
+        cmd, env = self._session_cmd_and_env(
+            ["spectacle", "-b", "-n", "-f", "-o", output_path],
+            display=display,
+        )
         try:
             proc = await asyncio.create_subprocess_exec(
-                "spectacle", "-b", "-n", "-f", "-o", output_path,
+                *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
             )
             await proc.communicate()
             if proc.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                if region:
-                    try:
-                        from PIL import Image
-                        with Image.open(output_path) as image:
-                            x, y, w, h = (int(region[k]) for k in ("x", "y", "w", "h"))
-                            image.crop((x, y, x + w, y + h)).save(output_path)
-                    except Exception:
-                        pass
+                if region and all(k in region for k in ("x", "y", "w", "h")):
+                    self._crop_image(output_path, region)
                 return True
         except Exception:
             pass
