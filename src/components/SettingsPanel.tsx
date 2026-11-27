@@ -67,13 +67,14 @@ export const SettingsPanel: FC = () => {
       const targetPath = res.realpath || res.path;
       if (targetPath) {
         setImportStatus(`Importing ${targetPath.split("/").pop()}...`);
-        const result = await call<[string], { imported: boolean; title?: string; terms?: number; error?: string }>(
+        const result = await call<[string], { imported: boolean; title?: string; terms?: number; ignored_banks?: string[]; error?: string }>(
           "import_yomitan_dict",
           targetPath
         );
 
         if (result.imported) {
-          const msg = `Imported "${result.title}" (${result.terms} terms)`;
+          const skipped = result.ignored_banks?.length ? ` · Skipped banks: ${result.ignored_banks.join(", ")}` : "";
+          const msg = `Imported "${result.title}" (${result.terms} terms)${skipped}`;
           setImportStatus(`✅ ${msg}`);
           try {
             toaster.toast({

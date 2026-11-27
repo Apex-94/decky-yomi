@@ -18,6 +18,8 @@ export interface DictSense {
 
 /** A dictionary entry for a word */
 export interface DictEntry {
+  headword?: string;
+  reading?: string;
   kanji: string[];
   kana: string[];
   senses: DictSense[];
@@ -42,6 +44,7 @@ export interface LookupResult {
 
 /** A word in the analysis results (word + its lookup) */
 export interface WordResult {
+  components?: WordResult[];
   word: WordInfo;
   lookup: LookupResult | null;
   skipped: boolean;

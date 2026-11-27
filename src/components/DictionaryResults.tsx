@@ -6,9 +6,10 @@ import {
   Focusable,
 } from "@decky/ui";
 import { call } from "../utils/diagnostics";
-import { toaster } from "@decky/api";
 import { KanjiDetail } from "./KanjiDetail";
-import type { AnalysisResult, WordResult, VocabEntry, Settings } from "../utils/types";
+import type { AnalysisResult, Settings } from "../utils/types";
+
+import { entryChoices, saveChoice, type EntryChoice } from "../utils/vocabulary";
 
 interface DictionaryResultsProps {
   result: AnalysisResult | null;
@@ -20,7 +21,7 @@ export const DictionaryResults: FC<DictionaryResultsProps> = ({
   onSaveWord,
 }) => {
   const [expandedWord, setExpandedWord] = useState<number | null>(null);
-  const [savedWords, setSavedWords] = useState<Set<number>>(new Set());
+  const [savedWords, setSavedWords] = useState<Set<string>>(new Set());
 
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -72,37 +73,13 @@ export const DictionaryResults: FC<DictionaryResultsProps> = ({
   }
 
   // ── Save word handler ──
-  const handleSaveWord = async (wordResult: WordResult, idx: number) => {
-    const entry = wordResult.lookup?.entries?.[0];
-    const meaning = entry?.senses
-      ?.map((s) => s.glosses.join(", "))
-      .join("; ") ?? "";
-
-    setSaving(true); setError("");
+  const handleSaveWord = async (choice: EntryChoice, key: string) => {
+    setSaving(true);
+    setError("");
     try {
-    const response = await call<[string, string, string, string, string, string], { saved: boolean; error?: string }>(
-      "save_word",
-      wordResult.word.surface,
-      entry?.kana?.[0] ?? wordResult.word.reading ?? "",
-      meaning,
-      wordResult.word.pos ?? "",
-      result.raw_text ?? "",
-      "" // game_name — auto-detection future feature
-    );
-
-    if (!response.saved) throw new Error(response.error || "Save failed");
-    try {
-      toaster.toast({
-        title: "Decky Yomi",
-        body: `Saved "${wordResult.word.surface}" to vocabulary!`,
-        duration: 2500,
-      });
-    } catch {
-      // Ignore if toaster not active
-    }
-
-    setSavedWords((prev) => new Set(prev).add(idx));
-    onSaveWord?.();
+      await saveChoice(choice, result.raw_text);
+      setSavedWords(prev => new Set(prev).add(key));
+      onSaveWord?.();
     } catch (e) { setError("Could not save word: " + String(e)); }
     finally { setSaving(false); }
   };
@@ -137,7 +114,7 @@ export const DictionaryResults: FC<DictionaryResultsProps> = ({
           const lookup = wordResult.lookup;
           const isExpanded = expandedWord === idx;
           const firstEntry = lookup?.entries?.[0];
-          const isSaved = savedWords.has(idx);
+          const choices = entryChoices(wordResult);
 
           return (
             <Focusable key={idx}>
@@ -160,7 +137,7 @@ export const DictionaryResults: FC<DictionaryResultsProps> = ({
                     </span>
                     {/* Reading */}
                     <span style={{ fontSize: "12px", opacity: 0.6 }}>
-                      {settings?.show_readings !== false ? (word.reading || firstEntry?.kana?.[0] || "") : ""}
+                      {settings?.show_readings !== false ? (word.reading || "") : ""}
                     </span>
                   </div>
 
@@ -218,82 +195,75 @@ export const DictionaryResults: FC<DictionaryResultsProps> = ({
                   )}
 
                   {/* All entries & senses */}
-                  {lookup.entries?.map((entry, eIdx) => (
-                    <div
-                      key={eIdx}
-                      style={{
-                        marginBottom: "10px",
-                        paddingBottom: "8px",
-                        borderBottom:
-                          eIdx < lookup.entries.length - 1
-                            ? "1px solid rgba(255,255,255,0.06)"
-                            : "none",
-                      }}
-                    >
-                      {/* Kanji + Kana heading */}
-                      <div style={{ fontWeight: "bold", fontSize: "14px" }}>
-                        {entry.kanji?.length > 0
-                          ? entry.kanji.join("、")
-                          : entry.kana?.join("、")}
-                        {settings?.show_readings !== false && entry.kanji?.length > 0 && entry.kana?.length > 0 && (
-                          <span
+                  {wordResult.components && <p>{wordResult.components.map(p => p.word.surface).join(" + ")}</p>}
+                  {choices.map((choice, eIdx) => {
+                    const { entry } = choice;
+                    const key = idx + "/" + eIdx;
+                    return (
+                      <div
+                        key={eIdx}
+                        style={{
+                          marginBottom: "10px",
+                          paddingBottom: "8px",
+                          borderBottom:
+                            eIdx < choices.length - 1
+                              ? "1px solid rgba(255,255,255,0.06)"
+                              : "none",
+                        }}
+                      >
+                        {/* Kanji + Kana heading */}
+                        <div style={{ fontWeight: "bold", fontSize: "14px" }}>
+                          {choice.word !== word && <small>{choice.word.surface} → </small>}
+                          {entry.headword || entry.kanji[0] || entry.kana[0]}
+                          {settings?.show_readings !== false && entry.reading && (
+                            <span> 【{entry.reading}】</span>
+                          )}
+                        </div>
+
+                        {/* Senses */}
+                        {entry.senses?.map((sense, sIdx) => (
+                          <div
+                            key={sIdx}
                             style={{
-                              fontWeight: "normal",
-                              fontSize: "12px",
-                              opacity: 0.6,
-                              marginLeft: "6px",
+                              marginLeft: "12px",
+                              marginTop: "3px",
+                              lineHeight: "1.4",
                             }}
                           >
-                            【{entry.kana.join("、")}】
-                          </span>
-                        )}
-                      </div>
-
-                      {/* Senses */}
-                      {entry.senses?.map((sense, sIdx) => (
-                        <div
-                          key={sIdx}
-                          style={{
-                            marginLeft: "12px",
-                            marginTop: "3px",
-                            lineHeight: "1.4",
-                          }}
-                        >
-                          <span style={{ color: "#888", fontSize: "11px" }}>
-                            {sIdx + 1}.{" "}
-                          </span>
-                          {settings?.show_pos !== false && sense.pos?.length > 0 && (
-                            <span
-                              style={{
-                                color: "#6ba3d6",
-                                fontSize: "10px",
-                                fontStyle: "italic",
-                              }}
-                            >
-                              [{sense.pos.join(", ")}]{" "}
+                            <span style={{ color: "#888", fontSize: "11px" }}>
+                              {sIdx + 1}.{" "}
                             </span>
-                          )}
-                          <span>{sense.glosses?.join("; ")}</span>
-                        </div>
-                      ))}
-                    </div>
-                  ))}
+                            {settings?.show_pos !== false && sense.pos?.length > 0 && (
+                              <span
+                                style={{
+                                  color: "#6ba3d6",
+                                  fontSize: "10px",
+                                  fontStyle: "italic",
+                                }}
+                              >
+                                [{sense.pos.join(", ")}]{" "}
+                              </span>
+                            )}
+                            <span style={{ whiteSpace: "pre-line" }}>{sense.glosses?.join("; ")}</span>
+                          </div>
+                        ))}
+                        <ButtonItem layout="below" onClick={() => handleSaveWord(choice, key)}
+                          disabled={savedWords.has(key) || saving}>
+                          {savedWords.has(key) ? "✓ Saved" : "Save this entry"}
+                        </ButtonItem>
+                      </div>
+                    );
+                  })}
 
                   {/* Kanji breakdown */}
                   {lookup.kanji?.length > 0 && (
                     <KanjiDetail kanjiList={lookup.kanji} />
                   )}
 
-                  {/* Save button */}
-                  <div style={{ marginTop: "8px" }}>
-                    <ButtonItem
-                      layout="below"
-                      onClick={() => handleSaveWord(wordResult, idx)}
-                      disabled={isSaved || saving}
-                    >
-                      {isSaved ? "✅ Saved!" : "💾 Save to Vocabulary"}
-                    </ButtonItem>
-                  </div>
+                  {choices.length === 0 && <ButtonItem layout="below" disabled={saving || savedWords.has(String(idx))}
+                    onClick={() => handleSaveWord({ word, entry: { kanji: [], kana: [], senses: [], id: null } }, String(idx))}>
+                    {savedWords.has(String(idx)) ? "✓ Saved" : "Save word without definition"}
+                  </ButtonItem>}
                 </div>
               )}
             </Focusable>

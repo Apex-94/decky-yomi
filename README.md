@@ -48,10 +48,14 @@ If you want to pre-install Python dependencies manually before deploying, run `.
 
 - **D-Pad Left / Right**: Move between words
 - **L1 / R1**: Jump to previous / next word with a dictionary match
-- **D-Pad Up / Down**: Switch dictionary entries when multiple exist
-- **A / X**: Save selected word
+- **D-Pad Up / Down**: Browse dictionary entries for the selected expression and its word parts
+- **A / X**: Save the displayed dictionary headword, reading, and meaning with the original sentence
 - **Y**: Re-capture and re-read
 - **B** (or hold `L4`): Close overlay
+
+The overlay groups expressions such as 気をつけて and inflections such as 行った. The reading above each group follows the text on screen. Its dictionary entry shows the base form, such as 行く【いく】. To fix a recognition error, open the OCR tab, edit the captured text, and choose **Look up text**.
+
+Yomitan imports support term banks with plain or structured definitions. Structured definitions are displayed and exported as text. The import result lists skipped bank types, including frequency and pitch metadata.
 
 ## Development and Testing
 

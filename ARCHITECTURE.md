@@ -60,8 +60,8 @@ sequenceDiagram
     Note over SM,UI: "Loading modal shown at 450ms if still running"
     PY->>EW: "run_ocr(capture.png)"
     EW-->>PY: "Recognized Japanese string"
-    PY->>EW: "segment_text() + lookup_word() per token"
-    EW-->>PY: "Morphemes + JMDict/KANJIDIC2 entries"
+    PY->>EW: "analyze_text(raw_text, image_path)"
+    EW-->>PY: "Expression spans, components, and ranked dictionary entries"
     PY-->>SM: "AnalysisResult"
     SM->>UI: "showModal(OverlayModalHost)"
     User->>SM: "D-Pad / L1 / R1 / A / Y / B"
@@ -94,7 +94,7 @@ sequenceDiagram
 `_crop_image(path, region)` converts percentage (`0..100`) or pixel coordinates to clamped `(x, y, w, h)` bounds and saves in-place via Pillow.
 
 #### OCR Dispatch & Splitting (`main.py`, `backend/engine_worker.py`)
-`engine_worker.py` communicates over newline-delimited JSON on `stdin`/`stdout` (redirecting `stdout` to `stderr` so library logs never corrupt protocol JSON). Allowed methods: `_init_engines`, `get_engine_status`, `run_ocr`, `segment_text`, `lookup_word`.
+`engine_worker.py` communicates over newline-delimited JSON on `stdin`/`stdout` (redirecting `stdout` to `stderr` so library logs never corrupt protocol JSON). Allowed methods: `_init_engines`, `get_engine_status`, `run_ocr`, `analyze_text`, `segment_text`, `lookup_word`. Sentence analysis uses `backend/japanese.py` to match contiguous UniDic spans and rank dictionary entries inside the worker.
 
 - **Primary (`meikiocr`)**: `_run_meiki_sync` converts the cropped image to BGR (`numpy`) and calls `MeikiOCR(provider="CPUExecutionProvider").run_ocr(bgr)`. It runs text detection (`meiki.text.detect.v0.1.960x544.onnx`) and horizontal/vertical recognition (`meiki.text.rec.v0.960x32.onnx` / `vertical.32x480.onnx`) directly without manual chunking.
 - **Fallback (`manga_ocr`)**: If `ocr_engine == "manga_ocr"` (or `meiki_ocr_engine is None`), `_split_ocr_regions` adapts wide/fullscreen crops for `manga-ocr`'s `224x224` ViT input:
@@ -111,7 +111,7 @@ sequenceDiagram
 - **`vocab.db`**:
   - `vocabulary(id INTEGER PRIMARY KEY AUTOINCREMENT, word TEXT NOT NULL, reading TEXT, meaning TEXT, pos TEXT, context_sentence TEXT, game_name TEXT, created_at TEXT, review_count INTEGER, last_reviewed TEXT)` with `idx_vocab_word`.
   - Deduplicated in `save_word` on `(word, reading, meaning)`; exported to `vocab_export.tsv` (tab-delimited).
-- **`custom_dicts.db`**: Each imported Yomitan `.zip` creates table `dict_<safe_name>(expression, reading, tags, rules, score, glossary, sequence, extra)` indexed on `expression`.
+- **`custom_dicts.db`**: Each imported Yomitan `.zip` creates table `dict_<safe_name>(expression, reading, tags, rules, score, glossary, sequence, extra)` indexed on `expression` and `reading`.
 - **`diagnostics.jsonl`**: `RotatingFileHandler` (`2 MB`, `3` backups) recording backend `@traced` spans, worker stderr, and batched frontend breadcrumbs. `get_hidraw_button_state` is intentionally untraced to prevent poll log rotation.
 
 ### 2.4 Backend RPC Surface (`Plugin` in `main.py`)

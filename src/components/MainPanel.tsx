@@ -8,6 +8,7 @@ import {
 } from "@decky/ui";
 import { call, trace } from "../utils/diagnostics";
 import { toaster } from "@decky/api";
+import { shortcutManager } from "../utils/shortcutManager";
 import { OCRPanel } from "./OCRPanel";
 import { DictionaryResults } from "./DictionaryResults";
 import { VocabList } from "./VocabList";
@@ -28,6 +29,17 @@ const TAB_LABELS: Record<Tab, string> = {
 export const MainPanel: FC = () => {
   const [activeTab, setActiveTab] = useState<Tab>("ocr");
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
+  const [text, setText] = useState("");
+  useEffect(() => {
+    let previous: AnalysisResult | null = null;
+    return shortcutManager.subscribe(({ result }) => {
+      if (result?.raw_text && result !== previous) {
+        previous = result;
+        setText(result.raw_text);
+        setAnalysisResult(result);
+      }
+    });
+  }, []);
   const [loading, setLoading] = useState(false);
   const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null);
 
@@ -47,9 +59,9 @@ export const MainPanel: FC = () => {
         region ?? null
       );
       setAnalysisResult(result);
+      if (result.raw_text) setText(result.raw_text);
       setActiveTab("results");
       if (!result.error) {
-        setActiveTab("results");
 
         // Quick toast notification if enabled
         try {
@@ -60,7 +72,7 @@ export const MainPanel: FC = () => {
             );
             if (firstValid && firstValid.lookup?.entries?.[0]) {
               const entry = firstValid.lookup.entries[0];
-              const reading = entry.kana?.[0] || firstValid.word.reading || "";
+              const reading = firstValid.word.reading || "";
               const gloss = entry.senses?.[0]?.glosses?.slice(0, 2).join(", ");
               const isCompact = settings.toast_detail === "compact";
               const durationMs = (settings.toast_duration || 4) * 1000;
@@ -153,7 +165,7 @@ export const MainPanel: FC = () => {
 
       {/* Tab Content */}
       {activeTab === "ocr" && (
-        <OCRPanel onCapture={handleCapture} loading={loading} onAnalyze={(result) => { setAnalysisResult(result); setActiveTab("results"); }} />
+        <OCRPanel text={text} setText={setText} onCapture={handleCapture} loading={loading} onAnalyze={(result) => { setAnalysisResult(result); setActiveTab("results"); }} />
       )}
       {activeTab === "results" && (
         <DictionaryResults

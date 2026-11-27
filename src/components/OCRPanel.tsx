@@ -13,11 +13,12 @@ import type { Region, Settings, AnalysisResult } from "../utils/types";
 interface OCRPanelProps {
   onCapture: (region?: Region) => void;
   loading: boolean;
+  text: string;
+  setText: (text: string) => void;
   onAnalyze: (result: AnalysisResult) => void;
 }
 
-export const OCRPanel: FC<OCRPanelProps> = ({ onCapture, loading, onAnalyze }) => {
-  const [text, setText] = useState("");
+export const OCRPanel: FC<OCRPanelProps> = ({ onCapture, loading, onAnalyze, text, setText }) => {
   const [error, setError] = useState("");
   const [analyzing, setAnalyzing] = useState(false);
   const [ocrMode, setOcrMode] = useState<string>("bottom_30");
