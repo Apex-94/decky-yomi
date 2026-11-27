@@ -15,7 +15,7 @@ plugin = Plugin()
 plugin.data_dir = data_dir
 plugin.config_path = os.path.join(data_dir, 'config.json')
 plugin._load_config()
-allowed = {'_init_engines', 'get_engine_status', 'run_ocr', 'segment_text', 'lookup_word'}
+allowed = {'_init_engines', 'get_engine_status', 'run_ocr', 'segment_text', 'analyze_text', 'lookup_word'}
 loop = asyncio.new_event_loop()
 for line in sys.stdin:
     try:

@@ -1,7 +1,7 @@
 import { FC, useState, useEffect, useRef, useCallback } from "react";
 import { findModuleChild, showModal, ModalRoot, Focusable, findSP } from "@decky/ui";
 import type { ShowModalResult } from "@decky/ui";
-import { call } from "@decky/api";
+import { entryChoices, saveChoice } from "../utils/vocabulary";
 import { shortcutManager, OverlayState, OverlayAction } from "../utils/shortcutManager";
 import type { WordResult } from "../utils/types";
 
@@ -45,13 +45,17 @@ const OverlayResultsCard: FC = () => {
   const [selectedWordIdx, setSelectedWordIdx] = useState<number>(0);
   const [selectedEntryIdx, setSelectedEntryIdx] = useState<number>(0);
   const [savingWord, setSavingWord] = useState<boolean>(false);
-  const [savedSet, setSavedSet] = useState<Set<number>>(new Set());
+  const [savedSet, setSavedSet] = useState<Set<string>>(new Set());
+  const [saveError, setSaveError] = useState("");
+  const lastResult = useRef<OverlayState["result"]>(null);
   const chipRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
   useEffect(() => {
     return shortcutManager.subscribe((newState) => {
       setState(newState);
-      if (newState.result?.words && newState.result.words.length > 0) {
+      if (newState.result?.words.length && newState.result !== lastResult.current) {
+        lastResult.current = newState.result;
+        setSaveError("");
         const firstDef = newState.result.words.findIndex(
           (w) => !w.skipped && w.lookup?.entries && w.lookup.entries.length > 0
         );
@@ -64,6 +68,7 @@ const OverlayResultsCard: FC = () => {
 
   useEffect(() => {
     setSelectedEntryIdx(0);
+    setSaveError("");
     const el = chipRefs.current[selectedWordIdx];
     if (el && typeof el.scrollIntoView === "function") {
       el.scrollIntoView({ block: "nearest", inline: "nearest" });
@@ -72,29 +77,22 @@ const OverlayResultsCard: FC = () => {
 
   const words = state.result?.words || [];
   const selectedWord = words[selectedWordIdx];
-  const entries = selectedWord?.lookup?.entries || [];
+  const entries = entryChoices(selectedWord);
   const safeEntryIdx = Math.min(selectedEntryIdx, Math.max(0, entries.length - 1));
-  const selectedEntry = entries[safeEntryIdx];
+  const selectedChoice = entries[safeEntryIdx];
+  const selectedEntry = selectedChoice?.entry;
+  const isSaved = savedSet.has(selectedWordIdx + "/" + safeEntryIdx);
 
   const handleSaveCurrentWord = useCallback(async (wordResult: WordResult, idx: number, entryIdx = 0) => {
-    const entry = wordResult.lookup?.entries?.[entryIdx] ?? wordResult.lookup?.entries?.[0];
-    const meaning =
-      entry?.senses?.map((s) => s.glosses.join(", ")).join("; ") ?? "";
-
+    const choice = entryChoices(wordResult)[entryIdx];
+    if (!choice) return;
     setSavingWord(true);
+    setSaveError("");
     try {
-      await call(
-        "save_word",
-        wordResult.word.surface,
-        entry?.kana?.[0] ?? wordResult.word.reading ?? "",
-        meaning,
-        wordResult.word.pos ?? "",
-        state.result?.raw_text ?? "",
-        ""
-      );
-      setSavedSet((prev) => new Set(prev).add(idx));
-    } catch (e) {
-      console.error("Save word failed", e);
+      await saveChoice(choice, state.result?.raw_text ?? "");
+      setSavedSet(prev => new Set(prev).add(idx + "/" + entryIdx));
+    } catch (error) {
+      setSaveError(String(error));
     }
     setSavingWord(false);
   }, [state.result?.raw_text]);
@@ -170,7 +168,7 @@ const OverlayResultsCard: FC = () => {
           break;
         case "save_word": {
           const w = ctx.words[ctx.selectedWordIdx];
-          if (w && (w.lookup?.entries?.length ?? 0) > 0 && !ctx.savingWord && !ctx.savedSet.has(ctx.selectedWordIdx)) {
+          if (w && ctx.entriesLen > 0 && !ctx.savingWord && !ctx.savedSet.has(ctx.selectedWordIdx + "/" + ctx.safeEntryIdx)) {
             void ctx.handleSaveCurrentWord(w, ctx.selectedWordIdx, ctx.safeEntryIdx);
           }
           break;
@@ -340,7 +338,7 @@ const OverlayResultsCard: FC = () => {
                 const hasLookup =
                   !w.skipped && w.lookup?.entries && w.lookup.entries.length > 0;
                 const reading =
-                  w.lookup?.entries?.[0]?.kana?.[0] || w.word.reading || "";
+                  w.word.reading || "";
 
                 return (
                   <button
@@ -397,11 +395,11 @@ const OverlayResultsCard: FC = () => {
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ display: "flex", alignItems: "baseline", gap: "10px", flexWrap: "wrap" }}>
                   <span style={{ fontSize: "18px", fontWeight: "bold", color: "#58a6ff" }}>
-                    {selectedWord.word.surface}
+                    {selectedEntry?.headword || selectedWord.word.surface}
                   </span>
-                  {selectedEntry?.kana?.[0] && (
+                  {selectedEntry?.reading && (
                     <span style={{ fontSize: "14px", opacity: 0.85 }}>
-                      【{selectedEntry.kana[0]}】
+                      【{selectedEntry.reading}】
                     </span>
                   )}
                   {selectedWord.word.pos && (
@@ -414,7 +412,7 @@ const OverlayResultsCard: FC = () => {
                         color: "#8b949e",
                       }}
                     >
-                      {selectedWord.word.pos}
+                      {selectedChoice?.word.pos ?? selectedWord.word.pos}
                     </span>
                   )}
                   {entries.length > 1 && (
@@ -447,6 +445,11 @@ const OverlayResultsCard: FC = () => {
                   )}
                 </div>
 
+                {selectedWord.components && <div style={{ fontSize: "12px" }}>
+                  {selectedWord.components.map(p => p.word.surface).join(" + ")}
+                  {selectedChoice && selectedChoice.word !== selectedWord.word && (" · " + selectedChoice.word.surface)}
+                </div>}
+                {saveError && <div role="alert">{saveError}</div>}
                 <div style={{ marginTop: "4px", fontSize: "13px", color: "#d0d7de" }}>
                   {selectedEntry?.senses && selectedEntry.senses.length > 0 ? (
                     selectedEntry.senses.slice(0, 3).map((s, sIdx) => (
@@ -454,7 +457,7 @@ const OverlayResultsCard: FC = () => {
                         <span style={{ opacity: 0.6, marginRight: "4px" }}>
                           {sIdx + 1}.
                         </span>
-                        {s.glosses.join(", ")}
+                        <span style={{ whiteSpace: "pre-line" }}>{s.glosses.join(", ")}</span>
                       </div>
                     ))
                   ) : (
@@ -467,13 +470,13 @@ const OverlayResultsCard: FC = () => {
 
               {selectedEntry && (
                 <button
-                  disabled={savingWord || savedSet.has(selectedWordIdx)}
+                  disabled={savingWord || isSaved}
                   onClick={() => handleSaveCurrentWord(selectedWord, selectedWordIdx, safeEntryIdx)}
                   style={{
-                    background: savedSet.has(selectedWordIdx)
+                    background: isSaved
                       ? "rgba(46, 160, 67, 0.3)"
                       : "#238636",
-                    border: savedSet.has(selectedWordIdx)
+                    border: isSaved
                       ? "1px solid #2ea043"
                       : "none",
                     color: "#FFFFFF",
@@ -481,11 +484,11 @@ const OverlayResultsCard: FC = () => {
                     borderRadius: "6px",
                     fontSize: "13px",
                     fontWeight: "bold",
-                    cursor: savedSet.has(selectedWordIdx) ? "default" : "pointer",
+                    cursor: isSaved ? "default" : "pointer",
                     flexShrink: 0,
                   }}
                 >
-                  {savedSet.has(selectedWordIdx)
+                  {isSaved
                     ? "✓ Saved"
                     : savingWord
                     ? "Saving..."

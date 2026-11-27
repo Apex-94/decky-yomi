@@ -29,6 +29,8 @@ PY_MODULES = os.path.join(PLUGIN_DIR, "py_modules")
 if os.path.exists(PY_MODULES) and PY_MODULES not in sys.path:
     sys.path.insert(0, PY_MODULES)
 
+from backend.japanese import JapaneseLookup, custom_dictionaries
+
 try:
     from backend.controller_monitor import ControllerButtonMonitor
 except ImportError:
@@ -1418,6 +1420,36 @@ class Plugin:
                 filtered.append(item)
         return filtered
 
+    @staticmethod
+    def _order_vertical_boxes(results):
+        # Group nearby vertical columns sharing a text band. Leave other blocks
+        # and horizontal UI labels in their original detector slots.
+        columns = {}
+        for i, item in enumerate(results):
+            boxes = [c["bbox"] for c in item.get("chars", [])] if item.get("is_vertical") else []
+            if boxes:
+                columns[i] = (min(b[0] for b in boxes), min(b[1] for b in boxes),
+                              max(b[2] for b in boxes), max(b[3] for b in boxes))
+        ordered = list(results)
+        remaining = set(columns)
+        while remaining:
+            group = [remaining.pop()]
+            for i in group:
+                left, top, right, bottom = columns[i]
+                for j in list(remaining):
+                    other_left, other_top, other_right, other_bottom = columns[j]
+                    gap = max(left - other_right, other_left - right, 0)
+                    overlap = min(bottom, other_bottom) - max(top, other_top)
+                    width = max(right - left, other_right - other_left)
+                    height = min(bottom - top, other_bottom - other_top)
+                    if gap <= 3 * width and overlap >= height / 2:
+                        group.append(j)
+                        remaining.remove(j)
+            reading_order = sorted(group, key=lambda k: (-columns[k][0], columns[k][1], k))
+            for slot, source in zip(sorted(group), reading_order):
+                ordered[slot] = results[source]
+        return ordered
+
     def _run_meiki_sync(self, image_path: str) -> str:
         """Run MeikiOCR synchronously on an image file and return joined text."""
         import numpy as np
@@ -1427,6 +1459,7 @@ class Plugin:
             rgb = np.array(im.convert("RGB"))
         bgr = rgb[:, :, ::-1].copy()
         results = self._filter_furigana_boxes(meiki_ocr_engine.run_ocr(bgr) or [])
+        results = self._order_vertical_boxes(results)
         lines = [
             (item.get("text") or "").strip()
             for item in results
@@ -1539,9 +1572,13 @@ class Plugin:
             return [{"surface": text, "reading": "", "lemma": text, "pos": "unknown"}]
 
         words = []
+        cursor = 0
         for word in morphological_tagger(text):
+            start = text.index(word.surface, cursor)
+            cursor = start + len(word.surface)
             entry = {
                 "surface": word.surface,
+                "start": start, "end": cursor,
                 "pos": str(word.pos) if word.pos else "unknown",
                 "reading": "",
                 "lemma": word.surface,
@@ -1553,6 +1590,8 @@ class Plugin:
                 entry["reading"] = feat.pron
             if hasattr(feat, "lemma") and feat.lemma:
                 entry["lemma"] = feat.lemma
+            entry["base"] = getattr(feat, "orthBase", None) or word.surface
+            entry["base_reading"] = getattr(feat, "kanaBase", None) or entry["reading"]
             words.append(entry)
 
         return words
@@ -1566,98 +1605,9 @@ class Plugin:
         """Look up a word in JMDict + KANJIDIC2 and imported custom dictionaries."""
         if getattr(sys, "frozen", False):
             return await self._worker_call("lookup_word", word)
-        if dictionary_engine is None:
-            # Fallback to custom imported dictionaries if JMDict is not yet loaded
-            custom_entries = []
-            try:
-                custom_matches = await self.lookup_custom_dict(word)
-                for cm in custom_matches:
-                    gloss = cm["glossary"]
-                    gloss_list = gloss if isinstance(gloss, list) else [str(gloss)]
-                    custom_entries.append({
-                        "kanji": [cm["expression"]],
-                        "kana": [cm["reading"]] if cm.get("reading") else [],
-                        "senses": [{
-                            "glosses": gloss_list,
-                            "pos": [f"dict:{cm['dict']}"],
-                        }],
-                        "id": None,
-                    })
-            except Exception:
-                pass
-            if custom_entries:
-                return {"query": word, "entries": custom_entries, "kanji": []}
-            return {"query": word, "entries": [], "kanji": [], "error": "Dictionary not loaded"}
-
-        try:
-            result = dictionary_engine.lookup(word)
-        except Exception as e:
-            decky.logger.error(f"Dictionary lookup error for '{word}': {e}")
-            return {"query": word, "entries": [], "kanji": [], "error": str(e)}
-
-        entries = []
-        max_results = self.config.get("max_results", 5)
-
-        for entry in result.entries[:max_results]:
-            senses = []
-            for sense in entry.senses:
-                senses.append({
-                    "glosses": [str(g) for g in sense.gloss],
-                    "pos": [str(p) for p in sense.pos] if sense.pos else [],
-                })
-            entries.append({
-                "kanji": [str(k) for k in entry.kanji_forms],
-                "kana": [str(k) for k in entry.kana_forms],
-                "senses": senses,
-                "id": entry.idseq if hasattr(entry, "idseq") else None,
-            })
-
-        # Also search imported Yomitan custom dictionaries
-        try:
-            custom_matches = await self.lookup_custom_dict(word)
-            for cm in custom_matches:
-                gloss = cm["glossary"]
-                gloss_list = gloss if isinstance(gloss, list) else [str(gloss)]
-                entries.append({
-                    "kanji": [cm["expression"]],
-                    "kana": [cm["reading"]] if cm.get("reading") else [],
-                    "senses": [{
-                        "glosses": gloss_list,
-                        "pos": [f"dict:{cm['dict']}"],
-                    }],
-                    "id": None,
-                })
-        except Exception as e:
-            decky.logger.error(f"Error querying custom dicts for '{word}': {e}")
-
-        # Look up individual kanji characters
-        kanji_info = []
-        if self.config.get("show_kanji_detail", True):
-            for char in word:
-                # CJK Unified Ideographs range
-                if "\u4e00" <= char <= "\u9fff":
-                    try:
-                        kr = dictionary_engine.lookup(char)
-                        for ch in kr.chars[:1]:
-                            kanji_info.append({
-                                "character": str(ch),
-                                "meanings": (
-                                    [str(m) for m in ch.meanings()]
-                                    if hasattr(ch, "meanings") else []
-                                ),
-                                "on_readings": (
-                                    list(ch.on_readings)
-                                    if hasattr(ch, "on_readings") else []
-                                ),
-                                "kun_readings": (
-                                    list(ch.kun_readings)
-                                    if hasattr(ch, "kun_readings") else []
-                                ),
-                            })
-                    except Exception:
-                        pass
-
-        return {"query": word, "entries": entries, "kanji": kanji_info}
+        with custom_dictionaries(Path(self.data_dir, "custom_dicts.db")) as custom_lookup:
+            engine = JapaneseLookup(dictionary_engine, custom_lookup, self.config)
+            return engine.lookup({"surface": word, "lemma": word, "reading": "", "pos": "unknown"})
 
     # ════════════════════════════════════════════════════════════
     #  FULL PIPELINE: CAPTURE → OCR → SEGMENT → LOOKUP
@@ -1703,38 +1653,14 @@ class Plugin:
         raw_text = raw_text.strip()
         if not raw_text:
             return {"error": "No text detected. Try a smaller region or enter text manually."}
+        if getattr(sys, "frozen", False):
+            return await self._worker_call("analyze_text", raw_text, image_path)
         words = (await self.segment_text(raw_text) if self.config.get("auto_segment", True)
                  else [{"surface": raw_text, "reading": "", "lemma": raw_text, "pos": "unknown"}])
 
-        # Step 4: Lookup each word
-        skip_particles = self.config.get("skip_particles", True)
-        particle_pos_prefixes = ("助詞", "記号", "補助記号", "空白")
-
-        results = []
-        for word_info in words:
-            # Skip particles / punctuation if configured
-            if skip_particles and any(
-                word_info["pos"].startswith(p) for p in particle_pos_prefixes
-            ):
-                results.append({
-                    "word": word_info,
-                    "lookup": None,
-                    "skipped": True,
-                })
-                continue
-
-            # Look up by lemma first, fall back to surface form
-            lookup_term = word_info.get("lemma", word_info["surface"])
-            lookup_result = await self.lookup_word(lookup_term)
-
-            if not lookup_result.get("entries") and lookup_term != word_info["surface"]:
-                lookup_result = await self.lookup_word(word_info["surface"])
-
-            results.append({
-                "word": word_info,
-                "lookup": lookup_result,
-                "skipped": False,
-            })
+        with custom_dictionaries(Path(self.data_dir, "custom_dicts.db")) as custom_lookup:
+            engine = JapaneseLookup(dictionary_engine, custom_lookup, self.config)
+            results = engine.analyze(words, self.config.get("skip_particles", True))
 
         return {
             "raw_text": raw_text,
@@ -2039,6 +1965,7 @@ class Plugin:
                 table = f"dict_{safe_name}"
 
                 conn = sqlite3.connect(custom_db_path)
+                conn.execute("BEGIN")
                 conn.execute(f"""
                     CREATE TABLE IF NOT EXISTS [{table}] (
                         expression TEXT,
@@ -2056,8 +1983,12 @@ class Plugin:
                     f"ON [{table}](expression)"
                 )
 
+                conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{safe_name}_reading ON [{table}](reading)")
+                ignored_banks = set()
                 for info in infos:
                     if not (info.filename.startswith("term_bank_") and info.filename.endswith(".json")):
+                        if "_bank_" in info.filename:
+                            ignored_banks.add(info.filename.split("_bank_")[0])
                         continue
                     remaining = YOMITAN_MAX_TOTAL_BYTES - total_bytes
                     if remaining <= 0:
@@ -2107,10 +2038,13 @@ class Plugin:
                             batch,
                         )
 
+            if count == 0:
+                raise ValueError("No terms to import. Supported bank type: term_bank. Found: "
+                                 + (", ".join(sorted(ignored_banks)) or "no term banks"))
             if conn is not None:
                 conn.commit()
             decky.logger.info(f"Imported Yomitan dict '{dict_title}': {count} terms")
-            return {"imported": True, "title": dict_title, "terms": count}
+            return {"imported": True, "title": dict_title, "terms": count, "ignored_banks": sorted(ignored_banks)}
         except Exception:
             if conn is not None:
                 try:
@@ -2134,38 +2068,8 @@ class Plugin:
     @traced
     async def lookup_custom_dict(self, word: str) -> list:
         """Look up a word across all imported Yomitan dictionaries."""
-        custom_db_path = os.path.join(self.data_dir, "custom_dicts.db")
-        if not os.path.exists(custom_db_path):
-            return []
-
-        results = []
-        try:
-            conn = sqlite3.connect(custom_db_path)
-            # Find all dict tables
-            tables = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'dict_%'"
-            ).fetchall()
-
-            for (table_name,) in tables:
-                rows = conn.execute(
-                    f"SELECT expression, reading, glossary, score "
-                    f"FROM [{table_name}] WHERE expression = ? "
-                    f"ORDER BY score DESC LIMIT 5",
-                    (word,),
-                ).fetchall()
-                for row in rows:
-                    results.append({
-                        "dict": table_name.replace("dict_", ""),
-                        "expression": row[0],
-                        "reading": row[1],
-                        "glossary": json.loads(row[2]),
-                        "score": row[3],
-                    })
-            conn.close()
-        except Exception as e:
-            decky.logger.error(f"Custom dict lookup failed: {e}")
-
-        return results
+        with custom_dictionaries(Path(self.data_dir, "custom_dicts.db")) as lookup:
+            return lookup(word, limit=5)
 
     # ════════════════════════════════════════════════════════════
     #  SETTINGS
