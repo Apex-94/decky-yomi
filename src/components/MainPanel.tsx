@@ -1,3 +1,4 @@
+import { surfaceReading } from "../utils/readings";
 import { useState, useEffect, FC } from "react";
 import {
   PanelSection,
@@ -72,7 +73,7 @@ export const MainPanel: FC = () => {
             );
             if (firstValid && firstValid.lookup?.entries?.[0]) {
               const entry = firstValid.lookup.entries[0];
-              const reading = firstValid.word.reading || "";
+              const reading = surfaceReading(firstValid.word);
               const gloss = entry.senses?.[0]?.glosses?.slice(0, 2).join(", ");
               const isCompact = settings.toast_detail === "compact";
               const durationMs = (settings.toast_duration || 4) * 1000;

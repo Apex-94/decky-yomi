@@ -243,7 +243,7 @@ class Plugin:
             self.diagnostic_logger.removeHandler(handler)
         handler = RotatingFileHandler(os.path.join(self.data_dir, "diagnostics.jsonl"), maxBytes=2_000_000, backupCount=3, encoding="utf-8")
         self.diagnostic_logger.addHandler(handler)
-        self._diagnostic("startup", "backend", version="0.1.9", python=sys.version)
+        self._diagnostic("startup", "backend", version="0.1.10", python=sys.version)
 
         self.config_path = os.path.join(self.data_dir, "config.json")
         self.vocab_db_path = os.path.join(self.data_dir, "vocab.db")

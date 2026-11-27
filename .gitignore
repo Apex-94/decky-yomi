@@ -34,3 +34,6 @@ __pycache__/
 test_runs/
 installer-tmp/
 installer-venv/
+
+# Local development notes
+/JAPANESE_PARITY_NOTES.md

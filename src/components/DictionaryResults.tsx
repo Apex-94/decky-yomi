@@ -1,3 +1,4 @@
+import { surfaceReading } from "../utils/readings";
 import { useState, useEffect, FC } from "react";
 import {
   PanelSection,
@@ -137,7 +138,7 @@ export const DictionaryResults: FC<DictionaryResultsProps> = ({
                     </span>
                     {/* Reading */}
                     <span style={{ fontSize: "12px", opacity: 0.6 }}>
-                      {settings?.show_readings !== false ? (word.reading || "") : ""}
+                      {settings?.show_readings !== false ? surfaceReading(word) : ""}
                     </span>
                   </div>
 
