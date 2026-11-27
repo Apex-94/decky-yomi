@@ -13,10 +13,47 @@ import uuid
 from pathlib import Path
 from datetime import datetime
 import shutil
+import ssl
 import platform
 import urllib.request
 import hashlib
 import zipfile
+
+_SYSTEM_CA_BUNDLES = (
+    "/etc/ssl/certs/ca-certificates.crt",
+    "/etc/pki/tls/certs/ca-bundle.crt",
+    "/etc/ssl/cert.pem",
+    "/etc/ssl/ca-bundle.pem",
+    "/etc/ca-certificates/extracted/tls-ca-bundle.pem",
+)
+
+
+def _find_ca_bundle() -> str | None:
+    """Locate a readable CA certificate bundle for frozen/embedded Python runtimes."""
+    env_ca = os.environ.get("SSL_CERT_FILE", "").strip()
+    if env_ca and os.path.isfile(env_ca):
+        return env_ca
+
+    try:
+        import certifi
+        certifi_ca = certifi.where()
+        if certifi_ca and os.path.isfile(certifi_ca):
+            return certifi_ca
+    except ImportError:
+        pass
+
+    for candidate in _SYSTEM_CA_BUNDLES:
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def _build_ssl_context() -> ssl.SSLContext:
+    """Create a verified SSLContext using certifi or system CA roots."""
+    cafile = _find_ca_bundle()
+    if cafile:
+        return ssl.create_default_context(cafile=cafile)
+    return ssl.create_default_context()
 
 # Add plugin directory and vendored modules to path before importing submodules
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -553,7 +590,7 @@ class Plugin:
 
     @staticmethod
     def _download_get_pip(dest_path: str):
-        with urllib.request.urlopen(GET_PIP_URL, timeout=60) as resp:
+        with urllib.request.urlopen(GET_PIP_URL, timeout=60, context=_build_ssl_context()) as resp:
             data = resp.read()
         digest = hashlib.sha256(data).hexdigest()
         if digest != GET_PIP_SHA256:
@@ -1342,6 +1379,62 @@ class Plugin:
         return merged
 
     @staticmethod
+    def _has_japanese_chars(text: str) -> bool:
+        """Return True if text contains hiragana, katakana, kanji, or CJK punctuation."""
+        return any(
+            "\u3040" <= ch <= "\u30ff"
+            or "\u4e00" <= ch <= "\u9fff"
+            or "\u3000" <= ch <= "\u303f"
+            or ch in "！？"
+            for ch in text
+        )
+
+    @classmethod
+    def _filter_background_noise(cls, results: list) -> list:
+        """Drop low-confidence, non-Japanese, and tiny background photo/sign detections."""
+        if not results or len(results) < 2:
+            return results
+
+        parsed = []
+        for item in results:
+            text = (item.get("text") or "").strip()
+            chars = item.get("chars") or []
+            confs = [float(c["conf"]) for c in chars if "conf" in c]
+            mean_conf = (sum(confs) / len(confs)) if confs else 1.0
+            is_vert = bool(item.get("is_vertical", False))
+            sizes = [
+                (c["bbox"][2] - c["bbox"][0]) if is_vert else (c["bbox"][3] - c["bbox"][1])
+                for c in chars
+                if c.get("bbox")
+            ]
+            avg_size = (sum(sizes) / len(sizes)) if sizes else 0.0
+            parsed.append({
+                "item": item,
+                "has_jp": cls._has_japanese_chars(text),
+                "mean_conf": mean_conf,
+                "size": avg_size,
+            })
+
+        jp_items = [p for p in parsed if p["has_jp"]]
+        if not jp_items:
+            return results
+
+        hi_jp = [p for p in jp_items if p["mean_conf"] >= 0.72]
+        dominant_size = max((p["size"] for p in hi_jp if p["size"] > 0), default=0.0)
+
+        kept = []
+        for p in parsed:
+            if not p["has_jp"]:
+                continue
+            if hi_jp and p["mean_conf"] < 0.50:
+                continue
+            if dominant_size > 0 and p["size"] > 0 and p["size"] < dominant_size * 0.45:
+                continue
+            kept.append(p["item"])
+
+        return kept or results
+
+    @staticmethod
     def _is_kana_only(text: str) -> bool:
         """Return True if text has >=1 char and all non-punctuation chars are hiragana/katakana."""
         has_kana = False
@@ -1426,7 +1519,8 @@ class Plugin:
         with Image.open(image_path) as im:
             rgb = np.array(im.convert("RGB"))
         bgr = rgb[:, :, ::-1].copy()
-        results = self._filter_furigana_boxes(meiki_ocr_engine.run_ocr(bgr) or [])
+        raw_results = self._filter_background_noise(meiki_ocr_engine.run_ocr(bgr) or [])
+        results = self._filter_furigana_boxes(raw_results)
         lines = [
             (item.get("text") or "").strip()
             for item in results

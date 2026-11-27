@@ -17,11 +17,13 @@ export function trace(event: string, detail = "") {
 async function flush() {
   if (sending || !pending.length) return;
   sending = true;
-  const batch = pending.slice(0, 25);
   try {
-    await deckyCall<[string[]], void>("log_frontend", batch);
-    pending = pending.filter(line => !batch.includes(line));
-    try { localStorage.setItem(storageKey, JSON.stringify(pending)); } catch {}
+    while (pending.length) {
+      const batch = pending.slice(0, 25);
+      await deckyCall<[string[]], void>("log_frontend", batch);
+      pending = pending.filter(line => !batch.includes(line));
+      try { localStorage.setItem(storageKey, JSON.stringify(pending)); } catch {}
+    }
   } catch { /* Keep bounded breadcrumbs locally until the backend reconnects. */ }
   finally { sending = false; }
 }
@@ -39,10 +41,26 @@ export const call = async <Args extends any[] = [], Return = void>(route: string
     throw error;
   }
 };
+export function isOwnDiagnosticSource(source: string): boolean {
+  if (/decky[-_ ]yomi/i.test(source)) return true;
+  if (/\/plugins\/|https?:\/\/|sp:\/\//i.test(source)) return false;
+  return true;
+}
+
 export function startDiagnostics() {
   try { const old = JSON.parse(localStorage.getItem(storageKey) || "[]"); if (Array.isArray(old)) pending = old.filter(x => typeof x === "string").slice(-100); } catch {}
-  const onError = (e: ErrorEvent) => trace("window.error", `${e.message} ${e.filename}:${e.lineno} ${e.error?.stack || ""}`);
-  const onRejection = (e: PromiseRejectionEvent) => trace("window.unhandledrejection", String(e.reason?.stack || e.reason));
+  const onError = (e: ErrorEvent) => {
+    const stack = e.error?.stack || "";
+    const filename = e.filename || "";
+    if (!filename && !stack && e.message === "Script error.") return;
+    if (!isOwnDiagnosticSource(`${filename} ${stack}`)) return;
+    trace("window.error", `${e.message} ${filename}:${e.lineno} ${stack}`);
+  };
+  const onRejection = (e: PromiseRejectionEvent) => {
+    const detail = String(e.reason?.stack || e.reason || "");
+    if (!isOwnDiagnosticSource(detail)) return;
+    trace("window.unhandledrejection", detail);
+  };
   const onPageHide = () => trace("window.pagehide");
   window.addEventListener("error", onError);
   window.addEventListener("unhandledrejection", onRejection);

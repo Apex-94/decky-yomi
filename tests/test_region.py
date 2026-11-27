@@ -169,3 +169,40 @@ class TestRegionSelection(unittest.TestCase):
         ]
         filtered_label = Plugin._filter_furigana_boxes(label_boxes)
         self.assertEqual([b["text"] for b in filtered_label], ["教室", "マークに近づいて"])
+
+    def test_filter_background_noise_drops_photo_signs_and_keeps_dialogue(self):
+        from main import Plugin
+
+        def make_box(text, y, h, conf):
+            return {
+                "text": text,
+                "is_vertical": False,
+                "chars": [
+                    {"bbox": [100 + i * 20, y, 118 + i * 20, y + h], "conf": conf}
+                    for i in range(max(1, len(text)))
+                ],
+            }
+
+        boxes = [
+            make_box("SOUEN", 20, 28, 0.43),
+            make_box("渋谷のスクランブル交差点は、今日も切れ目の", 71, 57, 0.91),
+            make_box("ない雑踏で覆いつくされている。", 152, 56, 0.95),
+            make_box("しかし、道行く人々の誰もが気づいてはいなかっ", 230, 61, 0.91),
+            make_box("た。", 316, 49, 0.90),
+            make_box("サロンバプ", 332, 19, 0.75),
+            make_box("AYA", 450, 10, 0.88),
+            make_box("GRRAK", 481, 12, 0.39),
+        ]
+        filtered = Plugin._filter_background_noise(boxes)
+        self.assertEqual(
+            [b["text"] for b in filtered],
+            [
+                "渋谷のスクランブル交差点は、今日も切れ目の",
+                "ない雑踏で覆いつくされている。",
+                "しかし、道行く人々の誰もが気づいてはいなかっ",
+                "た。",
+            ],
+        )
+
+        english_only = [make_box("START", 100, 30, 0.9), make_box("OPTIONS", 150, 30, 0.9)]
+        self.assertEqual(len(Plugin._filter_background_noise(english_only)), 2)

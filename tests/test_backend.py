@@ -285,9 +285,11 @@ class TestDeckyYomiBackend(unittest.TestCase):
 
         good_digest = main.hashlib.sha256(good).hexdigest()
         with patch("main.GET_PIP_SHA256", good_digest), \
-             patch("main.urllib.request.urlopen", return_value=io.BytesIO(good)):
+             patch("main.urllib.request.urlopen", return_value=io.BytesIO(good)) as mock_urlopen:
             self.plugin._download_get_pip(dest)
         self.assertTrue(os.path.exists(dest))
+        import ssl
+        self.assertIsInstance(mock_urlopen.call_args.kwargs.get("context"), ssl.SSLContext)
 
         locked_out = os.path.join(self.test_dir, "locked.txt")
         self.plugin._write_locked_requirements(["dictionary"], locked_out)
