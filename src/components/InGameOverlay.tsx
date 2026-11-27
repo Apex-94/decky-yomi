@@ -1,3 +1,4 @@
+import { surfaceReading } from "../utils/readings";
 import { FC, useState, useEffect, useRef, useCallback } from "react";
 import { findModuleChild, showModal, ModalRoot, Focusable, findSP } from "@decky/ui";
 import type { ShowModalResult } from "@decky/ui";
@@ -338,7 +339,7 @@ const OverlayResultsCard: FC = () => {
                 const hasLookup =
                   !w.skipped && w.lookup?.entries && w.lookup.entries.length > 0;
                 const reading =
-                  w.word.reading || "";
+                  surfaceReading(w.word);
 
                 return (
                   <button

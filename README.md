@@ -21,14 +21,22 @@ When you are playing a game or visual novel in Gaming Mode, hold `L4` (or anothe
 
 ## Requirements
 
-- Steam Deck running SteamOS with [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader)
+- Steam Deck running SteamOS (`x86_64`) or ARM64 Linux (`aarch64`, tested on DroidDeck / Ubuntu 26.04) with [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader)
 - `gst-launch-1.0` (PipeWire) and `ffmpeg` (included on SteamOS)
+
+### ARM64 / DroidDeck Support
+
+Decky Yomi also supports ARM64 Linux devices such as DroidDeck:
+
+- **PyTorch & dependencies**: The installer automatically picks CPU-only `aarch64` PyTorch wheels, falls back to `venv --without-pip` + `get-pip.py` when `ensurepip` is unavailable, and skips optional `evdev` if `gcc`/`linux/input.h` are not installed.
+- **Controller input**: When no `/dev/hidraw*` Steam Deck device is present, the controller monitor reads DroidDeck's `RBIF`/`IMU1` shared-memory input ring for `L4`/`R4` and D-Pad shortcuts.
+- **Paths & permissions**: Helper scripts resolve `~/homebrew` dynamically and only wrap capture commands with `runuser -u deck` when the `deck` user exists.
 
 ## Installation
 
 ### From a release ZIP
 
-1. Download `decky-yomi-0.1.9.zip` from the Releases page.
+1. Download `decky-yomi-0.1.10.zip` from the Releases page.
 2. In Gaming Mode, open **Decky -> Settings -> Developer** and enable Developer Mode if needed.
 3. Choose **Install Plugin from ZIP** and select the downloaded archive.
 4. Open **Decky Yomi -> Setup** in the Quick Access Menu and run the one-click downloader to install the Python packages and models into `~/homebrew/settings/decky-yomi/`.

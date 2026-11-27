@@ -1,6 +1,6 @@
 {
   "name": "decky-yomi",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Japanese learning plugin for Steam Deck",
   "license": "GPL-3.0-or-later",
   "type": "module",

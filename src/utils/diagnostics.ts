@@ -47,7 +47,7 @@ export function startDiagnostics() {
   window.addEventListener("error", onError);
   window.addEventListener("unhandledrejection", onRejection);
   window.addEventListener("pagehide", onPageHide);
-  trace("frontend.start", "version=0.1.9");
+  trace("frontend.start", "version=0.1.10");
   timer = setInterval(() => { void flush(); }, 2000);
   void flush();
   return () => {
